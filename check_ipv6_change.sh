@@ -2,10 +2,33 @@
 
 # 日志文件路径
 LOG_FILE="/root/docker/ipv6_check.log"
+MAX_LOG_LINES=1000
 
 # 记录日志函数
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S'): $1" | tee -a "$LOG_FILE"
+}
+
+# 限制日志文件大小
+limit_log_size() {
+    if [ -f "$LOG_FILE" ]; then
+        # 计算当前行数
+        local line_count=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+        
+        # 如果超过最大行数，只保留最后1000行
+        if [ "$line_count" -gt "$MAX_LOG_LINES" ]; then
+            log "日志文件超过 ${MAX_LOG_LINES} 行，正在清理..."
+            local temp_file="${LOG_FILE}.tmp"
+            
+            # 保留最后1000行
+            tail -n "$MAX_LOG_LINES" "$LOG_FILE" > "$temp_file"
+            
+            # 替换原文件
+            mv "$temp_file" "$LOG_FILE"
+            
+            log "日志文件已清理，保留最新的 ${MAX_LOG_LINES} 行"
+        fi
+    fi
 }
 
 # 检查 eth0 是否有有效的 IPv6/64 地址
@@ -57,6 +80,9 @@ check_ipv6() {
 }
 
 # 主程序
+# 先限制日志大小
+limit_log_size
+
 log "开始检查 IPv6 状态"
 
 # 输出当前 IPv6 状态
