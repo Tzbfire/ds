@@ -1,45 +1,81 @@
 #!/bin/sh
 
-# 获取 eth0 的 IPv6 地址信息
-ipv6_info=$(ip -6 addr show dev eth0 scope global dynamic 2>/dev/null)
+# 更简单的方法：直接检查是否有非 deprecated 且 preferred_lft > 0 的 IPv6/64 地址
+check_ipv6_simple() {
+    # 获取所有全局 IPv6 地址
+    ip -6 addr show dev eth0 scope global 2>/dev/null | \
+    awk '/inet6.*\/64.*scope global/ && !/deprecated/ {
+        getline next_line
+        if (next_line ~ /preferred_lft [1-9][0-9]*sec/) {
+            print "找到有效 IPv6 地址"
+            exit 0
+        }
+    } END {
+        if (NR == 0) exit 1
+        exit 1
+    }'
+    
+    return $?
+}
 
-# 检查是否有可用的 IPv6/64 地址
-has_valid_ipv6=false
-
-# 遍历每个全局动态 IPv6 地址
-while IFS= read -r line; do
-    # 匹配 IPv6 地址行（包含 /64）
-    if echo "$line" | grep -q 'inet6.*/64.*scope global.*dynamic'; then
-        # 提取地址部分
-        addr=$(echo "$line" | awk '{print $2}' | cut -d'/' -f1)
+# 或者使用这个更可靠的方法
+check_ipv6_reliable() {
+    # 使用 ip -j 输出 JSON 格式（如果支持）
+    if ip -j -6 addr show dev eth0 scope global 2>/dev/null >/dev/null 2>&1; then
+        # 支持 JSON 输出
+        local has_valid=$(ip -j -6 addr show dev eth0 scope global 2>/dev/null | \
+            jq -r '.[].addr_info[] | select(.prefixlen==64 and .scope=="global" and .valid_life_time>0 and .preferred_life_time>0) | .local' | head -1)
         
-        # 检查地址状态（非 deprecated 且 preferred_lft > 0）
-        status=$(ip -6 addr show dev eth0 to "$addr" 2>/dev/null | grep -E 'inet6.*scope global.*dynamic')
-        
-        if echo "$status" | grep -q 'deprecated'; then
-            echo "IPv6 地址 $addr 状态: deprecated (已弃用)"
-            continue
+        if [ -n "$has_valid" ]; then
+            echo "找到有效 IPv6 地址: $has_valid/64"
+            return 0
         fi
+    else
+        # 不支持 JSON，使用文本解析
+        local output=$(ip -6 addr show dev eth0 scope global 2>/dev/null)
         
-        # 提取 preferred_lft 值
-        pref_lft=$(echo "$status" | grep -o 'preferred_lft [0-9]*sec' | awk '{print $2}' | tr -d 'sec')
+        # 将输出按地址块分割处理
+        echo "$output" | awk '
+        BEGIN { valid=0 }
+        /inet6.*\/64.*scope global/ {
+            # 保存当前地址行
+            addr_line=$0
+            # 检查是否包含 deprecated
+            if ($0 ~ /deprecated/) {
+                next
+            }
+            # 读取续行
+            getline
+            if ($0 ~ /preferred_lft 0sec/) {
+                next
+            }
+            # 检查 preferred_lft 是否大于 0
+            if (match($0, /preferred_lft ([0-9]+)sec/, arr) && arr[1] > 0) {
+                valid=1
+                print "找到有效 IPv6 地址"
+                exit
+            }
+        }
+        END { if (!valid) exit 1 }'
         
-        if [ -n "$pref_lft" ] && [ "$pref_lft" -gt 0 ]; then
-            echo "找到有效的 IPv6/64 地址: $addr/64 (preferred_lft: ${pref_lft}秒)"
-            has_valid_ipv6=true
-            # 可以退出循环，至少找到一个有效地址
-            break
-        else
-            echo "IPv6 地址 $addr 状态: preferred_lft 为 0 或无效"
-        fi
+        return $?
     fi
-done <<EOF
-$ipv6_info
-EOF
+    
+    return 1
+}
 
-# 根据检查结果执行操作
-if [ "$has_valid_ipv6" = false ]; then
+# 主逻辑
+echo "$(date): 开始检查 IPv6 状态..."
+
+# 检查是否有有效 IPv6 地址
+if check_ipv6_reliable; then
+    echo "$(date): IPv6 连接正常"
+    exit 0
+else
     echo "$(date): 未找到有效的 IPv6/64 地址，正在重启 WAN6 接口..."
+    
+    # 记录日志
+    logger -t ipv6-check "没有有效 IPv6 地址，重启 WAN6 接口"
     
     # 重启 WAN6 接口
     ifdown wan6
@@ -48,9 +84,16 @@ if [ "$has_valid_ipv6" = false ]; then
     
     echo "WAN6 接口已重启"
     
-    # 可选：重启后再次检查
+    # 等待一段时间让接口重新获取地址
+    sleep 10
+    
+    # 重启后再次检查并记录
     echo "重启后检查 IPv6 状态..."
-    ip -6 addr show dev eth0 scope global dynamic 2>/dev/null | grep -E 'inet6.*/64.*scope global.*dynamic'
-else
-    echo "$(date): IPv6 连接正常"
+    ip -6 addr show dev eth0 scope global 2>/dev/null
+    
+    # 记录到系统日志
+    logger -t ipv6-check "WAN6 接口已重启，当前 IPv6 状态:"
+    ip -6 addr show dev eth0 scope global 2>/dev/null | logger -t ipv6-check
+    
+    exit 1
 fi
