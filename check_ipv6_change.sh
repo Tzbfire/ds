@@ -36,10 +36,15 @@ check_ipv6() {
     # 获取 eth0 的所有全局 IPv6 地址
     local ipv6_info=$(ip -6 addr show dev eth0 scope global 2>/dev/null)
     
-    # 记录详细 IPv6 信息到日志
-    log "详细 IPv6 信息:"
-    echo "$ipv6_info" | while IFS= read -r line; do
-        echo "  $line" >> "$LOG_FILE"
+    # 简化日志：只记录IPv6地址相关的关键信息
+    log "当前IPv6地址状态:"
+    
+    # 只提取并记录IPv6地址信息
+    echo "$ipv6_info" | grep -A2 'inet6.*/64.*scope global' | while IFS= read -r line; do
+        # 跳过空行和接口信息行
+        if echo "$line" | grep -q 'inet6' || echo "$line" | grep -q 'valid_lft\|preferred_lft'; then
+            echo "  $line" >> "$LOG_FILE"
+        fi
     done
     
     # 检查是否有非 deprecated 的 IPv6/64 地址
@@ -85,12 +90,6 @@ limit_log_size
 
 log "开始检查 IPv6 状态"
 
-# 输出当前 IPv6 状态
-log "当前 IPv6 状态摘要:"
-ip -6 addr show dev eth0 scope global 2>/dev/null | grep -A1 'inet6.*/64.*scope global' | while IFS= read -r line; do
-    echo "  $line" >> "$LOG_FILE"
-done
-
 if check_ipv6; then
     log "IPv6 连接正常"
     exit 0
@@ -106,9 +105,11 @@ else
     
     # 重启后检查状态
     sleep 3
-    log "重启后 IPv6 状态:"
-    ip -6 addr show dev eth0 scope global 2>/dev/null | while IFS= read -r line; do
-        echo "  $line" >> "$LOG_FILE"
+    log "重启后 IPv6 地址状态:"
+    ip -6 addr show dev eth0 scope global 2>/dev/null | grep -A2 'inet6.*/64.*scope global' | while IFS= read -r line; do
+        if echo "$line" | grep -q 'inet6' || echo "$line" | grep -q 'valid_lft\|preferred_lft'; then
+            echo "  $line" >> "$LOG_FILE"
+        fi
     done
     
     exit 1
